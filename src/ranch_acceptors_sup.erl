@@ -1,4 +1,4 @@
-%% Copyright (c) 2011-2016, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2011-2017, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -30,8 +30,9 @@ init([Ref, NumAcceptors, Transport, TransOpts]) ->
 			TransOpts2 = proplists:delete(ack_timeout,
 				proplists:delete(connection_type,
 				proplists:delete(max_connections,
+				proplists:delete(num_acceptors,
 				proplists:delete(shutdown,
-				proplists:delete(socket, TransOpts))))),
+				proplists:delete(socket, TransOpts)))))),
 			case Transport:listen(TransOpts2) of
 				{ok, Socket} -> Socket;
 				{error, Reason} -> listen_error(Ref, Transport, TransOpts2, Reason)
