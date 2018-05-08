@@ -1,5 +1,5 @@
 %% Copyright (c) 2013, James Fish <james@fishcakez.com>
-%% Copyright (c) 2015-2017, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2015-2018, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -227,6 +227,12 @@ rawfile_range_small(Config) ->
 	ok = Transport:close(Server).
 
 ssl_chunk_size(Config) ->
+	case code:is_module_native(?MODULE) of
+		true -> doc("This test uses tracing and is not compatible with native code.");
+		false -> do_ssl_chunk_size(Config)
+	end.
+
+do_ssl_chunk_size(Config) ->
 	doc("Use sendfile with SSL. Ensure the sendfile fallback respects the chunk size."),
 	Transport = config(transport, Config),
 	Filename = config(filename, Config),

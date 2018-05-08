@@ -1,4 +1,4 @@
-%% Copyright (c) 2011-2017, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2011-2018, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -213,7 +213,8 @@ loop(State=#state{parent=Parent, ref=Ref, conn_type=ConnType,
 		Msg ->
 			error_logger:error_msg(
 				"Ranch listener ~p received unexpected message ~p~n",
-				[Ref, Msg])
+				[Ref, Msg]),
+			loop(State, CurConns, NbChildren, Sleepers)
 	end.
 
 shoot(State=#state{ref=Ref, transport=Transport, ack_timeout=AckTimeout, max_conns=MaxConns},

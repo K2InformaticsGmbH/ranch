@@ -1,4 +1,4 @@
-%% Copyright (c) 2011-2017, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2011-2018, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -17,17 +17,23 @@
 -export([start_listener/5]).
 -export([start_listener/6]).
 -export([stop_listener/1]).
+-export([suspend_listener/1]).
+-export([resume_listener/1]).
 -export([child_spec/5]).
 -export([child_spec/6]).
 -export([accept_ack/1]).
 -export([remove_connection/1]).
+-export([get_status/1]).
 -export([get_addr/1]).
 -export([get_port/1]).
 -export([get_max_connections/1]).
 -export([set_max_connections/2]).
+-export([get_transport_options/1]).
+-export([set_transport_options/2]).
 -export([get_protocol_options/1]).
 -export([set_protocol_options/2]).
 -export([info/0]).
+-export([info/1]).
 -export([procs/2]).
 -export([filter_options/3]).
 -export([set_option_default/3]).
@@ -110,6 +116,37 @@ stop_listener(Ref) ->
 			{error, Reason}
 	end.
 
+-spec suspend_listener(ref()) -> ok | {error, term()}.
+suspend_listener(Ref) ->
+	case get_status(Ref) of
+		running ->
+			ListenerSup = ranch_server:get_listener_sup(Ref),
+			ok = ranch_server:set_addr(Ref, {undefined, undefined}),
+			supervisor:terminate_child(ListenerSup, ranch_acceptors_sup);
+		suspended ->
+			ok
+	end.
+
+-spec resume_listener(ref()) -> ok | {error, term()}.
+resume_listener(Ref) ->
+	case get_status(Ref) of
+		running ->
+			ok;
+		suspended ->
+			ListenerSup = ranch_server:get_listener_sup(Ref),
+			Res = supervisor:restart_child(ListenerSup, ranch_acceptors_sup),
+			maybe_resumed(Res)
+	end.
+
+maybe_resumed(Error={error, {listen_error, _, Reason}}) ->
+	start_error(Reason, Error);
+maybe_resumed({ok, _}) ->
+	ok;
+maybe_resumed({ok, _, _}) ->
+	ok;
+maybe_resumed(Res) ->
+	Res.
+
 -spec child_spec(ref(), module(), any(), module(), any())
 	-> supervisor:child_spec().
 child_spec(Ref, Transport, TransOpts, Protocol, ProtoOpts) ->
@@ -137,11 +174,22 @@ remove_connection(Ref) ->
 	ConnsSup ! {remove_connection, Ref, self()},
 	ok.
 
--spec get_addr(ref()) -> {inet:ip_address(), inet:port_number()}.
+-spec get_status(ref()) -> running | suspended | restarting.
+get_status(Ref) ->
+	ListenerSup = ranch_server:get_listener_sup(Ref),
+	Children = supervisor:which_children(ListenerSup),
+	case lists:keyfind(ranch_acceptors_sup, 1, Children) of
+		{_, undefined, _, _} ->
+			suspended;
+		{_, AcceptorsSup, _, _} when is_pid(AcceptorsSup) ->
+			running
+	end.
+
+-spec get_addr(ref()) -> {inet:ip_address(), inet:port_number()} | {undefined, undefined}.
 get_addr(Ref) ->
 	ranch_server:get_addr(Ref).
 
--spec get_port(ref()) -> inet:port_number().
+-spec get_port(ref()) -> inet:port_number() | undefined.
 get_port(Ref) ->
 	{_, Port} = get_addr(Ref),
 	Port.
@@ -154,6 +202,19 @@ get_max_connections(Ref) ->
 set_max_connections(Ref, MaxConnections) ->
 	ranch_server:set_max_connections(Ref, MaxConnections).
 
+-spec get_transport_options(ref()) -> any().
+get_transport_options(Ref) ->
+	ranch_server:get_transport_options(Ref).
+
+-spec set_transport_options(ref(), any()) -> ok | {error, running}.
+set_transport_options(Ref, TransOpts) ->
+	case get_status(Ref) of
+		suspended ->
+			ok = ranch_server:set_transport_options(Ref, TransOpts);
+		running ->
+			{error, running}
+	end.
+
 -spec get_protocol_options(ref()) -> any().
 get_protocol_options(Ref) ->
 	ranch_server:get_protocol_options(Ref).
@@ -164,18 +225,25 @@ set_protocol_options(Ref, Opts) ->
 
 -spec info() -> [{any(), [{atom(), any()}]}].
 info() ->
-	Children = supervisor:which_children(ranch_sup),
 	[{Ref, listener_info(Ref, Pid)}
-		|| {{ranch_listener_sup, Ref}, Pid, _, [_]} <- Children].
+		|| {Ref, Pid} <- ranch_server:get_listener_sups()].
+
+-spec info(ref()) -> [{atom(), any()}].
+info(Ref) ->
+	Pid = ranch_server:get_listener_sup(Ref),
+	listener_info(Ref, Pid).
 
 listener_info(Ref, Pid) ->
-	[_, NumAcceptors, Transport, TransOpts, Protocol, _] = listener_start_args(Ref),
+	[_, NumAcceptors, Transport, _, Protocol, _] = ranch_server:get_listener_start_args(Ref),
 	ConnsSup = ranch_server:get_connections_sup(Ref),
+	Status = get_status(Ref),
 	{IP, Port} = get_addr(Ref),
 	MaxConns = get_max_connections(Ref),
+	TransOpts = ranch_server:get_transport_options(Ref),
 	ProtoOpts = get_protocol_options(Ref),
 	[
 		{pid, Pid},
+		{status, Status},
 		{ip, IP},
 		{port, Port},
 		{num_acceptors, NumAcceptors},
@@ -188,24 +256,6 @@ listener_info(Ref, Pid) ->
 		{protocol_options, ProtoOpts}
 	].
 
-listener_start_args(Ref) ->
-	case erlang:function_exported(supervisor, get_childspec, 2) of
-		true ->
-			%% Can't use map syntax before R18.
-			{ok, Map} = supervisor:get_childspec(ranch_sup, {ranch_listener_sup, Ref}),
-			{ranch_listener_sup, start_link, StartArgs} = maps:get(start, Map),
-			StartArgs;
-		false ->
-			%% Awful solution for compatibility with R16 and R17.
-			{status, _, _, [_, _, _, _, [_, _,
-				{data, [{_, {state, _, _, Children, _, _, _, _, _, _}}]}]]}
-				= sys:get_status(ranch_sup),
-			[StartArgs] = [StartArgs || {child, _, {ranch_listener_sup, ChildRef},
-				{ranch_listener_sup, start_link, StartArgs}, _, _, _, _}
-				<- Children, ChildRef =:= Ref],
-			StartArgs
-	end.
-
 -spec procs(ref(), acceptors | connections) -> [pid()].
 procs(Ref, acceptors) ->
 	procs1(Ref, ranch_acceptors_sup);
@@ -213,11 +263,14 @@ procs(Ref, connections) ->
 	procs1(Ref, ranch_conns_sup).
 
 procs1(Ref, Sup) ->
-	{_, ListenerSup, _, _} = lists:keyfind({ranch_listener_sup, Ref}, 1,
-		supervisor:which_children(ranch_sup)),
+	ListenerSup = ranch_server:get_listener_sup(Ref),
 	{_, SupPid, _, _} = lists:keyfind(Sup, 1,
 		supervisor:which_children(ListenerSup)),
-	[Pid || {_, Pid, _, _} <- supervisor:which_children(SupPid)].
+	try
+		[Pid || {_, Pid, _, _} <- supervisor:which_children(SupPid)]
+	catch exit:{noproc, _} when Sup =:= ranch_acceptors_sup ->
+		[]
+	end.
 
 -spec filter_options([inet | inet6 | {atom(), any()} | {raw, any(), any(), any()}],
 	[atom()], Acc) -> Acc when Acc :: [any()].
