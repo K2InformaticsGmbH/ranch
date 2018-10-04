@@ -156,10 +156,10 @@ init([]) ->
 	{ok, #state{monitors=ConnMonitors++ListenerMonitors}}.
 
 handle_call({set_new_listener_opts, Ref, MaxConns, TransOpts, ProtoOpts, StartArgs}, _, State) ->
-	ets:insert(?TAB, {{max_conns, Ref}, MaxConns}),
-	ets:insert(?TAB, {{trans_opts, Ref}, TransOpts}),
-	ets:insert(?TAB, {{proto_opts, Ref}, ProtoOpts}),
-	ets:insert(?TAB, {{listener_start_args, Ref}, StartArgs}),
+	ets:insert_new(?TAB, {{max_conns, Ref}, MaxConns}),
+	ets:insert_new(?TAB, {{trans_opts, Ref}, TransOpts}),
+	ets:insert_new(?TAB, {{proto_opts, Ref}, ProtoOpts}),
+	ets:insert_new(?TAB, {{listener_start_args, Ref}, StartArgs}),
 	{reply, ok, State};
 handle_call({set_connections_sup, Ref, Pid}, _,
 		State=#state{monitors=Monitors}) ->
@@ -203,10 +203,20 @@ handle_call(_Request, _From, State) ->
 handle_cast(_Request, State) ->
 	{noreply, State}.
 
-handle_info({'DOWN', MonitorRef, process, Pid, _},
+handle_info({'DOWN', MonitorRef, process, Pid, Reason},
 		State=#state{monitors=Monitors}) ->
 	{_, TypeRef} = lists:keyfind({MonitorRef, Pid}, 1, Monitors),
-	_ = ets:delete(?TAB, TypeRef),
+	ok = case {TypeRef, Reason} of
+		{{listener_sup, Ref}, normal} ->
+			cleanup_listener_opts(Ref);
+		{{listener_sup, Ref}, shutdown} ->
+			cleanup_listener_opts(Ref);
+		{{listener_sup, Ref}, {shutdown, _}} ->
+			cleanup_listener_opts(Ref);
+		_ ->
+			_ = ets:delete(?TAB, TypeRef),
+			ok
+	end,
 	Monitors2 = lists:keydelete({MonitorRef, Pid}, 1, Monitors),
 	{noreply, State#state{monitors=Monitors2}};
 handle_info(_Info, State) ->

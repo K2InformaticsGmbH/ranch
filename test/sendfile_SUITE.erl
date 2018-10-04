@@ -15,6 +15,7 @@
 
 -module(sendfile_SUITE).
 -compile(export_all).
+-compile(nowarn_export_all).
 
 -import(ct_helper, [config/2]).
 -import(ct_helper, [doc/1]).
@@ -279,7 +280,7 @@ sockets(Config) ->
 	end,
 	_ = spawn_link(Fun),
 	{ok, Server} = Transport:accept(LSocket, 500),
-	ok = Transport:accept_ack(Server, 500),
+	{ok, _} = Transport:handshake(Server, [], 500),
 	receive
 		{ok, Client} ->
 			ok = Transport:close(LSocket),

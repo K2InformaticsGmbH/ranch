@@ -17,6 +17,8 @@
 -export([sendfile/6]).
 
 -type socket() :: any().
+-export_type([socket/0]).
+
 -type opts() :: any().
 -type stats() :: any().
 -type sendfile_opts() :: [{chunk_size, non_neg_integer()}].
@@ -28,7 +30,7 @@
 -callback listen(opts()) -> {ok, socket()} | {error, atom()}.
 -callback accept(socket(), timeout())
 	-> {ok, socket()} | {error, closed | timeout | atom()}.
--callback accept_ack(socket(), timeout()) -> ok.
+-callback handshake(socket(), opts(), timeout()) -> {ok, socket()} | {error, any()}.
 -callback connect(string(), inet:port_number(), opts())
 	-> {ok, socket()} | {error, atom()}.
 -callback connect(string(), inet:port_number(), opts(), timeout())
@@ -36,11 +38,11 @@
 -callback recv(socket(), non_neg_integer(), timeout())
 	-> {ok, any()} | {error, closed | timeout | atom()}.
 -callback send(socket(), iodata()) -> ok | {error, atom()}.
--callback sendfile(socket(), file:name() | file:fd())
+-callback sendfile(socket(), file:name_all() | file:fd())
 	-> {ok, non_neg_integer()} | {error, atom()}.
--callback sendfile(socket(), file:name() | file:fd(), non_neg_integer(),
+-callback sendfile(socket(), file:name_all() | file:fd(), non_neg_integer(),
 		non_neg_integer()) -> {ok, non_neg_integer()} | {error, atom()}.
--callback sendfile(socket(), file:name() | file:fd(), non_neg_integer(),
+-callback sendfile(socket(), file:name_all() | file:fd(), non_neg_integer(),
 		non_neg_integer(), sendfile_opts())
 	-> {ok, non_neg_integer()} | {error, atom()}.
 -callback setopts(socket(), opts()) -> ok | {error, atom()}.
@@ -60,7 +62,7 @@
 %% A fallback for transports that don't have a native sendfile implementation.
 %% Note that the ordering of arguments is different from file:sendfile/5 and
 %% that this function accepts either a raw file or a file name.
--spec sendfile(module(), socket(), file:filename_all() | file:fd(),
+-spec sendfile(module(), socket(), file:name_all() | file:fd(),
 		non_neg_integer(), non_neg_integer(), sendfile_opts())
 	-> {ok, non_neg_integer()} | {error, atom()}.
 sendfile(Transport, Socket, Filename, Offset, Bytes, Opts)
@@ -114,7 +116,7 @@ chunk_size(Opts) ->
 
 -spec sendfile_loop(module(), socket(), file:fd(), non_neg_integer(),
 		non_neg_integer(), pos_integer())
-	-> {ok, non_neg_integer()} | {error, term()}.
+	-> {ok, non_neg_integer()} | {error, any()}.
 sendfile_loop(_Transport, _Socket, _RawFile, Sent, Sent, _ChunkSize)
 		when Sent =/= 0 ->
 	%% All requested data has been read and sent, return number of bytes sent.

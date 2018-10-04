@@ -15,6 +15,10 @@
 -module(ranch_ssl).
 -behaviour(ranch_transport).
 
+-ifdef(OTP_RELEASE).
+-compile({nowarn_deprecated_function, [{ssl, ssl_accept, 3}]}).
+-endif.
+
 -export([name/0]).
 -export([secure/0]).
 -export([messages/0]).
@@ -22,6 +26,7 @@
 -export([disallowed_listen_options/0]).
 -export([accept/2]).
 -export([accept_ack/2]).
+-export([handshake/3]).
 -export([connect/3]).
 -export([connect/4]).
 -export([recv/3]).
@@ -45,7 +50,7 @@
 	| {cacerts, [public_key:der_encoded()]}
 	| {cert, public_key:der_encoded()}
 	| {certfile, string()}
-	| {ciphers, [ssl:erl_cipher_suite()] | string()}
+	| {ciphers, [ssl_cipher:erl_cipher_suite()]}
 	| {client_renegotiation, boolean()}
 	| {crl_cache, {module(), {internal | any(), list()}}}
 	| {crl_check, boolean() | peer | best_effort}
@@ -71,7 +76,7 @@
 	| {sni_hosts, [{string(), ssl_opt()}]}
 	| {user_lookup_fun, {fun(), any()}}
 	| {v2_hello_compatible, boolean()}
-	| {verify, ssl:verify_type()}
+	| {verify, verify_none | verify_peer}
 	| {verify_fun, {fun(), any()}}
 	| {versions, [atom()]}.
 -export_type([ssl_opt/0]).
@@ -102,16 +107,15 @@ listen(Opts) ->
 			{error, no_cert}
 	end.
 
-do_listen(Opts) ->
-	Opts2 = ranch:set_option_default(Opts, backlog, 1024),
-	Opts3 = ranch:set_option_default(Opts2, ciphers, unbroken_cipher_suites()),
-	Opts4 = ranch:set_option_default(Opts3, nodelay, true),
-	Opts5 = ranch:set_option_default(Opts4, send_timeout, 30000),
-	Opts6 = ranch:set_option_default(Opts5, send_timeout_close, true),
+do_listen(Opts0) ->
+	Opts1 = ranch:set_option_default(Opts0, backlog, 1024),
+	Opts2 = ranch:set_option_default(Opts1, nodelay, true),
+	Opts3 = ranch:set_option_default(Opts2, send_timeout, 30000),
+	Opts = ranch:set_option_default(Opts3, send_timeout_close, true),
 	%% We set the port to 0 because it is given in the Opts directly.
 	%% The port in the options takes precedence over the one in the
 	%% first argument.
-	ssl:listen(0, ranch:filter_options(Opts6, disallowed_listen_options(),
+	ssl:listen(0, ranch:filter_options(Opts, disallowed_listen_options(),
 		[binary, {active, false}, {packet, raw}, {reuseaddr, true}])).
 
 %% 'binary' and 'list' are disallowed but they are handled
@@ -128,20 +132,19 @@ accept(LSocket, Timeout) ->
 
 -spec accept_ack(ssl:sslsocket(), timeout()) -> ok.
 accept_ack(CSocket, Timeout) ->
-	case ssl:ssl_accept(CSocket, Timeout) of
+	{ok, _} = handshake(CSocket, [], Timeout),
+	ok.
+
+-spec handshake(inet:socket() | ssl:sslsocket(), opts(), timeout())
+	-> {ok, ssl:sslsocket()} | {error, any()}.
+handshake(CSocket, Opts, Timeout) ->
+	case ssl:ssl_accept(CSocket, Opts, Timeout) of
 		ok ->
-			ok;
-		%% Garbage was most likely sent to the socket, don't error out.
-		{error, {tls_alert, _}} ->
-			ok = close(CSocket),
-			exit(normal);
-		%% Socket most likely stopped responding, don't error out.
-		{error, Reason} when Reason =:= timeout; Reason =:= closed ->
-			ok = close(CSocket),
-			exit(normal);
-		{error, Reason} ->
-			ok = close(CSocket),
-			error(Reason)
+			{ok, CSocket};
+		{ok, NewSocket} ->
+			{ok, NewSocket};
+		Error = {error, _} ->
+			Error
 	end.
 
 %% @todo Probably filter Opts?
@@ -197,15 +200,15 @@ setopts(Socket, Opts) ->
 
 -spec getopts(ssl:sslsocket(), [atom()]) -> {ok, list()} | {error, atom()}.
 getopts(Socket, Opts) ->
-        ssl:getopts(Socket, Opts).
+	ssl:getopts(Socket, Opts).
 
 -spec getstat(ssl:sslsocket()) -> {ok, list()} | {error, atom()}.
 getstat(Socket) ->
-        ssl:getstat(Socket).
+	ssl:getstat(Socket).
 
 -spec getstat(ssl:sslsocket(), [atom()]) -> {ok, list()} | {error, atom()}.
 getstat(Socket, OptionNames) ->
-        ssl:getstat(Socket, OptionNames).
+	ssl:getstat(Socket, OptionNames).
 
 -spec controlling_process(ssl:sslsocket(), pid())
 	-> ok | {error, closed | not_owner | atom()}.
@@ -230,22 +233,3 @@ shutdown(Socket, How) ->
 -spec close(ssl:sslsocket()) -> ok.
 close(Socket) ->
 	ssl:close(Socket).
-
-%% Internal.
-
-%% Unfortunately the implementation of elliptic-curve ciphers that has
-%% been introduced in R16B01 is incomplete.  Depending on the particular
-%% client, this can cause the TLS handshake to break during key
-%% agreement.  Depending on the ssl application version, this function
-%% returns a list of all cipher suites that are supported by default,
-%% minus the elliptic-curve ones.
--spec unbroken_cipher_suites() -> [ssl:erl_cipher_suite()].
-unbroken_cipher_suites() ->
-	case proplists:get_value(ssl_app, ssl:versions()) of
-		Version when Version =:= "5.3"; Version =:= "5.3.1" ->
-			lists:filter(fun(Suite) ->
-				string:left(atom_to_list(element(1, Suite)), 4) =/= "ecdh"
-			end, ssl:cipher_suites());
-		_ ->
-			ssl:cipher_suites()
-	end.

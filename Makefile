@@ -2,13 +2,13 @@
 
 PROJECT = ranch
 PROJECT_DESCRIPTION = Socket acceptor pool for TCP protocols.
-PROJECT_VERSION = 1.5.0
+PROJECT_VERSION = 1.6.2
 PROJECT_REGISTERED = ranch_server
 
 # Options.
 
-CT_OPTS += -pa test -ct_hooks ranch_ct_hook []
-PLT_APPS = crypto public_key ssl
+CT_OPTS += -pa test -ct_hooks ranch_ct_hook [] # -boot start_sasl
+PLT_APPS = crypto public_key tools
 
 # Dependencies.
 

@@ -22,6 +22,7 @@
 -export([disallowed_listen_options/0]).
 -export([accept/2]).
 -export([accept_ack/2]).
+-export([handshake/3]).
 -export([connect/3]).
 -export([connect/4]).
 -export([recv/3]).
@@ -100,8 +101,13 @@ accept(LSocket, Timeout) ->
 	gen_tcp:accept(LSocket, Timeout).
 
 -spec accept_ack(inet:socket(), timeout()) -> ok.
-accept_ack(_, _) ->
+accept_ack(CSocket, Timeout) ->
+	{ok, _} = handshake(CSocket, [], Timeout),
 	ok.
+
+-spec handshake(inet:socket(), opts(), timeout()) -> {ok, inet:socket()}.
+handshake(CSocket, _, _) ->
+	{ok, CSocket}.
 
 %% @todo Probably filter Opts?
 -spec connect(inet:ip_address() | inet:hostname(),
@@ -179,15 +185,15 @@ setopts(Socket, Opts) ->
 
 -spec getopts(inet:socket(), [atom()]) -> {ok, list()} | {error, atom()}.
 getopts(Socket, Opts) ->
-        inet:getopts(Socket, Opts).
+	inet:getopts(Socket, Opts).
 
 -spec getstat(inet:socket()) -> {ok, list()} | {error, atom()}.
 getstat(Socket) ->
-        inet:getstat(Socket).
+	inet:getstat(Socket).
 
 -spec getstat(inet:socket(), [atom()]) -> {ok, list()} | {error, atom()}.
 getstat(Socket, OptionNames) ->
-        inet:getstat(Socket, OptionNames).
+	inet:getstat(Socket, OptionNames).
 
 -spec controlling_process(inet:socket(), pid())
 	-> ok | {error, closed | not_owner | atom()}.

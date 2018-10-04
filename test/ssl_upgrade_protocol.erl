@@ -1,4 +1,4 @@
--module(echo_protocol).
+-module(ssl_upgrade_protocol).
 -behaviour(ranch_protocol).
 
 -export([start_link/4]).
@@ -14,8 +14,13 @@ init(Ref, Transport, _Opts = []) ->
 
 loop(Socket, Transport) ->
 	case Transport:recv(Socket, 0, 5000) of
-		{ok, Data} ->
-			Transport:send(Socket, Data),
+		{ok, <<"UPGRADE">>} when Transport =:= ranch_tcp ->
+			ok = Transport:send(Socket, <<"READY">>),
+			Opts = ct_helper:get_certs_from_ets(),
+			{ok, NewSocket} = ranch_ssl:handshake(Socket, [{verify, verify_none}|Opts], 1000),
+			loop(NewSocket, ranch_ssl);
+		{ok, <<"ECHO ", More/binary>>} ->
+			ok = Transport:send(Socket, More),
 			loop(Socket, Transport);
 		_ ->
 			ok = Transport:close(Socket)
