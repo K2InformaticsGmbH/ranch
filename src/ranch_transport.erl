@@ -26,17 +26,25 @@
 
 -callback name() -> atom().
 -callback secure() -> boolean().
--callback messages() -> {OK::atom(), Closed::atom(), Error::atom()}.
--callback listen(opts()) -> {ok, socket()} | {error, atom()}.
+-callback messages() -> {OK::atom(), Closed::atom(), Error::atom(), Passive::atom()}.
+-callback listen(ranch:transport_opts(any())) -> {ok, socket()} | {error, atom()}.
 -callback accept(socket(), timeout())
 	-> {ok, socket()} | {error, closed | timeout | atom()}.
--callback handshake(socket(), opts(), timeout()) -> {ok, socket()} | {error, any()}.
+-callback handshake(socket(), timeout()) -> {ok, socket()} | {ok, socket(), any()} | {error, any()}.
+-callback handshake(socket(), opts(), timeout()) -> {ok, socket()} | {ok, socket(), any()} | {error, any()}.
+-callback handshake_continue(socket(), timeout()) -> {ok, socket()} | {error, any()}.
+-callback handshake_continue(socket(), opts(), timeout()) -> {ok, socket()} | {error, any()}.
+-callback handshake_cancel(socket()) -> ok.
 -callback connect(string(), inet:port_number(), opts())
 	-> {ok, socket()} | {error, atom()}.
 -callback connect(string(), inet:port_number(), opts(), timeout())
 	-> {ok, socket()} | {error, atom()}.
 -callback recv(socket(), non_neg_integer(), timeout())
 	-> {ok, any()} | {error, closed | timeout | atom()}.
+-callback recv_proxy_header(socket(), timeout())
+	-> {ok, ranch_proxy_header:proxy_info()}
+	| {error, closed | atom()}
+	| {error, protocol_error, atom()}.
 -callback send(socket(), iodata()) -> ok | {error, atom()}.
 -callback sendfile(socket(), file:name_all() | file:fd())
 	-> {ok, non_neg_integer()} | {error, atom()}.
@@ -52,9 +60,9 @@
 -callback controlling_process(socket(), pid())
 	-> ok | {error, closed | not_owner | atom()}.
 -callback peername(socket())
-	-> {ok, {inet:ip_address(), inet:port_number()}} | {error, atom()}.
+	-> {ok, {inet:ip_address(), inet:port_number()} | {local, binary()}} | {error, atom()}.
 -callback sockname(socket())
-	-> {ok, {inet:ip_address(), inet:port_number()}} | {error, atom()}.
+	-> {ok, {inet:ip_address(), inet:port_number()} | {local, binary()}} | {error, atom()}.
 -callback shutdown(socket(), read | write | read_write)
 	-> ok | {error, atom()}.
 -callback close(socket()) -> ok.

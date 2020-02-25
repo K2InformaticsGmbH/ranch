@@ -19,10 +19,14 @@
 -export([stop/1]).
 -export([profile_output/0]).
 
+-spec start(application:start_type(), term()) -> {ok, pid()} | {error, term()}.
 start(_, _) ->
 	_ = consider_profiling(),
+	ranch_server = ets:new(ranch_server, [
+		ordered_set, public, named_table]),
 	ranch_sup:start_link().
 
+-spec stop(term()) -> ok.
 stop(_) ->
 	ok.
 

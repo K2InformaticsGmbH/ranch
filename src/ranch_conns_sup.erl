@@ -18,12 +18,12 @@
 -module(ranch_conns_sup).
 
 %% API.
--export([start_link/3]).
--export([start_protocol/2]).
+-export([start_link/6]).
+-export([start_protocol/3]).
 -export([active_connections/1]).
 
 %% Supervisor internals.
--export([init/4]).
+-export([init/7]).
 -export([system_continue/3]).
 -export([system_terminate/4]).
 -export([system_code_change/4]).
@@ -46,10 +46,10 @@
 
 %% API.
 
--spec start_link(ranch:ref(), module(), module()) -> {ok, pid()}.
-start_link(Ref, Transport, Protocol) ->
+-spec start_link(ranch:ref(), pos_integer(), module(), any(), module(), module()) -> {ok, pid()}.
+start_link(Ref, Id, Transport, TransOpts, Protocol, Logger) ->
 	proc_lib:start_link(?MODULE, init,
-		[self(), Ref, Transport, Protocol]).
+		[self(), Ref, Id, Transport, TransOpts, Protocol, Logger]).
 
 %% We can safely assume we are on the same node as the supervisor.
 %%
@@ -67,10 +67,15 @@ start_link(Ref, Transport, Protocol) ->
 %% We do not need the reply, we only need the ok from the supervisor
 %% to continue. The supervisor sends its own pid when the acceptor can
 %% continue.
--spec start_protocol(pid(), inet:socket()) -> ok.
-start_protocol(SupPid, Socket) ->
+-spec start_protocol(pid(), reference(), inet:socket()) -> ok.
+start_protocol(SupPid, MonitorRef, Socket) ->
 	SupPid ! {?MODULE, start_protocol, self(), Socket},
-	receive SupPid -> ok end.
+	receive
+		SupPid ->
+			ok;
+		{'DOWN', MonitorRef, process, SupPid, Reason} ->
+			error(Reason)
+	end.
 
 %% We can't make the above assumptions here. This function might be
 %% called from anywhere.
@@ -94,16 +99,14 @@ active_connections(SupPid) ->
 
 %% Supervisor internals.
 
--spec init(pid(), ranch:ref(), module(), module()) -> no_return().
-init(Parent, Ref, Transport, Protocol) ->
+-spec init(pid(), ranch:ref(), pos_integer(), module(), any(), module(), module()) -> no_return().
+init(Parent, Ref, Id, Transport, TransOpts, Protocol, Logger) ->
 	process_flag(trap_exit, true),
-	ok = ranch_server:set_connections_sup(Ref, self()),
+	ok = ranch_server:set_connections_sup(Ref, Id, self()),
 	MaxConns = ranch_server:get_max_connections(Ref),
-	TransOpts = ranch_server:get_transport_options(Ref),
 	ConnType = maps:get(connection_type, TransOpts, worker),
 	Shutdown = maps:get(shutdown, TransOpts, 5000),
 	HandshakeTimeout = maps:get(handshake_timeout, TransOpts, 5000),
-	Logger = maps:get(logger, TransOpts, error_logger),
 	ProtoOpts = ranch_server:get_protocol_options(Ref),
 	ok = proc_lib:init_ack(Parent, {ok, self()}),
 	loop(#state{parent=Parent, ref=Ref, conn_type=ConnType,
@@ -116,7 +119,7 @@ loop(State=#state{parent=Parent, ref=Ref, conn_type=ConnType,
 		max_conns=MaxConns, logger=Logger}, CurConns, NbChildren, Sleepers) ->
 	receive
 		{?MODULE, start_protocol, To, Socket} ->
-			try Protocol:start_link(Ref, Socket, Transport, Opts) of
+			try Protocol:start_link(Ref, Transport, Opts) of
 				{ok, Pid} ->
 					handshake(State, CurConns, NbChildren, Sleepers, To, Socket, Pid, Pid);
 				{ok, SupPid, ProtocolPid} when ConnType =:= supervisor ->
@@ -125,7 +128,7 @@ loop(State=#state{parent=Parent, ref=Ref, conn_type=ConnType,
 					To ! self(),
 					ranch:log(error,
 						"Ranch listener ~p connection process start failure; "
-						"~p:start_link/4 returned: ~999999p~n",
+						"~p:start_link/3 returned: ~999999p~n",
 						[Ref, Protocol, Ret], Logger),
 					Transport:close(Socket),
 					loop(State, CurConns, NbChildren, Sleepers)
@@ -133,8 +136,9 @@ loop(State=#state{parent=Parent, ref=Ref, conn_type=ConnType,
 				To ! self(),
 				ranch:log(error,
 					"Ranch listener ~p connection process start failure; "
-					"~p:start_link/4 crashed with reason: ~p:~999999p~n",
+					"~p:start_link/3 crashed with reason: ~p:~999999p~n",
 					[Ref, Protocol, Class, Reason], Logger),
+				Transport:close(Socket),
 				loop(State, CurConns, NbChildren, Sleepers)
 			end;
 		{?MODULE, active_connections, To, Tag} ->
@@ -143,9 +147,13 @@ loop(State=#state{parent=Parent, ref=Ref, conn_type=ConnType,
 		%% Remove a connection from the count of connections.
 		{remove_connection, Ref, Pid} ->
 			case put(Pid, removed) of
-				active ->
+				active when Sleepers =:= [] ->
 					loop(State, CurConns - 1, NbChildren, Sleepers);
-				remove ->
+				active ->
+					[To|Sleepers2] = Sleepers,
+					To ! self(),
+					loop(State, CurConns - 1, NbChildren, Sleepers2);
+				removed ->
 					loop(State, CurConns, NbChildren, Sleepers);
 				undefined ->
 					_ = erase(Pid),
@@ -160,8 +168,11 @@ loop(State=#state{parent=Parent, ref=Ref, conn_type=ConnType,
 		{set_max_conns, MaxConns2} ->
 			loop(State#state{max_conns=MaxConns2},
 				CurConns, NbChildren, Sleepers);
+		%% Upgrade the transport options.
+		{set_transport_options, TransOpts} ->
+			set_transport_options(State, CurConns, NbChildren, Sleepers, TransOpts);
 		%% Upgrade the protocol options.
-		{set_opts, Opts2} ->
+		{set_protocol_options, Opts2} ->
 			loop(State#state{opts=Opts2},
 				CurConns, NbChildren, Sleepers);
 		{'EXIT', Parent, Reason} ->
@@ -244,6 +255,20 @@ handshake(State=#state{ref=Ref, transport=Transport, handshake_timeout=Handshake
 			loop(State, CurConns, NbChildren, Sleepers)
 	end.
 
+set_transport_options(State=#state{max_conns=MaxConns0}, CurConns, NbChildren, Sleepers0, TransOpts) ->
+	MaxConns1 = maps:get(max_connections, TransOpts, 1024),
+	HandshakeTimeout = maps:get(handshake_timeout, TransOpts, 5000),
+	Shutdown = maps:get(shutdown, TransOpts, 5000),
+	Sleepers1 = case MaxConns1 > MaxConns0 of
+		true ->
+			_ = [To ! self() || To <- Sleepers0],
+			[];
+		false ->
+			Sleepers0
+	end,
+	loop(State#state{max_conns=MaxConns1, handshake_timeout=HandshakeTimeout, shutdown=Shutdown},
+		CurConns, NbChildren, Sleepers1).
+
 -spec terminate(#state{}, any(), non_neg_integer()) -> no_return().
 terminate(#state{shutdown=brutal_kill}, Reason, _) ->
 	kill_children(get_keys(active)),
@@ -286,7 +311,7 @@ wait_children(0) ->
 	ok;
 wait_children(NbChildren) ->
 	receive
-        {'DOWN', _, process, Pid, _} ->
+		{'DOWN', _, process, Pid, _} ->
 			case erase(Pid) of
 				active -> wait_children(NbChildren - 1);
 				removed -> wait_children(NbChildren - 1);
@@ -300,6 +325,7 @@ wait_children(NbChildren) ->
 			ok
 	end.
 
+-spec system_continue(_, _, any()) -> no_return().
 system_continue(_, _, {State, CurConns, NbChildren, Sleepers}) ->
 	loop(State, CurConns, NbChildren, Sleepers).
 
@@ -307,6 +333,7 @@ system_continue(_, _, {State, CurConns, NbChildren, Sleepers}) ->
 system_terminate(Reason, _, _, {State, _, NbChildren, _}) ->
 	terminate(State, Reason, NbChildren).
 
+-spec system_code_change(any(), _, _, _) -> {ok, any()}.
 system_code_change(Misc, _, _, _) ->
 	{ok, Misc}.
 
@@ -321,5 +348,5 @@ report_error(_, _, _, _, {shutdown, _}) ->
 report_error(Logger, Ref, Protocol, Pid, Reason) ->
 	ranch:log(error,
 		"Ranch listener ~p had connection process started with "
-		"~p:start_link/4 at ~p exit with reason: ~999999p~n",
+		"~p:start_link/3 at ~p exit with reason: ~999999p~n",
 		[Ref, Protocol, Pid, Reason], Logger).

@@ -14,24 +14,32 @@
 
 -module(ranch_acceptor).
 
--export([start_link/4]).
--export([loop/4]).
+-export([start_link/5]).
+-export([init/4]).
+-export([loop/5]).
 
--spec start_link(inet:socket(), module(), module(), pid())
+-spec start_link(ranch:ref(), pos_integer(), inet:socket(), module(), module())
 	-> {ok, pid()}.
-start_link(LSocket, Transport, Logger, ConnsSup) ->
-	Pid = spawn_link(?MODULE, loop, [LSocket, Transport, Logger, ConnsSup]),
+start_link(Ref, AcceptorId, LSocket, Transport, Logger) ->
+	ConnsSup = ranch_server:get_connections_sup(Ref, AcceptorId),
+	Pid = spawn_link(?MODULE, init, [LSocket, Transport, Logger, ConnsSup]),
 	{ok, Pid}.
 
--spec loop(inet:socket(), module(), module(), pid()) -> no_return().
-loop(LSocket, Transport, Logger, ConnsSup) ->
+-spec init(inet:socket(), module(), module(), pid()) -> no_return().
+init(LSocket, Transport, Logger, ConnsSup) ->
+	MonitorRef = monitor(process, ConnsSup),
+	loop(LSocket, Transport, Logger, ConnsSup, MonitorRef).
+
+-spec loop(inet:socket(), module(), module(), pid(), reference()) -> no_return().
+loop(LSocket, Transport, Logger, ConnsSup, MonitorRef) ->
 	_ = case Transport:accept(LSocket, infinity) of
 		{ok, CSocket} ->
 			case Transport:controlling_process(CSocket, ConnsSup) of
 				ok ->
 					%% This call will not return until process has been started
 					%% AND we are below the maximum number of connections.
-					ranch_conns_sup:start_protocol(ConnsSup, CSocket);
+					ranch_conns_sup:start_protocol(ConnsSup, MonitorRef,
+						CSocket);
 				{error, _} ->
 					Transport:close(CSocket)
 			end;
@@ -43,12 +51,15 @@ loop(LSocket, Transport, Logger, ConnsSup) ->
 				"Ranch acceptor reducing accept rate: out of file descriptors~n",
 				[], Logger),
 			receive after 100 -> ok end;
-		%% We want to crash if the listening socket got closed.
-		{error, Reason} when Reason =/= closed ->
+		%% Exit if the listening socket got closed.
+		{error, closed} ->
+			exit(closed);
+		%% Continue otherwise.
+		{error, _} ->
 			ok
 	end,
 	flush(Logger),
-	?MODULE:loop(LSocket, Transport, Logger, ConnsSup).
+	?MODULE:loop(LSocket, Transport, Logger, ConnsSup, MonitorRef).
 
 flush(Logger) ->
 	receive Msg ->

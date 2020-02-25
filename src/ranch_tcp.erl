@@ -21,11 +21,15 @@
 -export([listen/1]).
 -export([disallowed_listen_options/0]).
 -export([accept/2]).
--export([accept_ack/2]).
+-export([handshake/2]).
 -export([handshake/3]).
+-export([handshake_continue/2]).
+-export([handshake_continue/3]).
+-export([handshake_cancel/1]).
 -export([connect/3]).
 -export([connect/4]).
 -export([recv/3]).
+-export([recv_proxy_header/2]).
 -export([send/2]).
 -export([sendfile/2]).
 -export([sendfile/4]).
@@ -50,7 +54,7 @@
 	| {high_watermark, non_neg_integer()}
 	| inet
 	| inet6
-	| {ip, inet:ip_address()}
+	| {ip, inet:ip_address() | inet:local_address()}
 	| {ipv6_v6only, boolean()}
 	| {keepalive, boolean()}
 	| {linger, {boolean(), non_neg_integer()}}
@@ -70,28 +74,33 @@
 -type opts() :: [opt()].
 -export_type([opts/0]).
 
+-spec name() -> tcp.
 name() -> tcp.
 
 -spec secure() -> boolean().
 secure() ->
-    false.
+	false.
 
-messages() -> {tcp, tcp_closed, tcp_error}.
+-spec messages() -> {tcp, tcp_closed, tcp_error, tcp_passive}.
+messages() -> {tcp, tcp_closed, tcp_error, tcp_passive}.
 
--spec listen(opts()) -> {ok, inet:socket()} | {error, atom()}.
-listen(Opts) ->
-	Opts2 = ranch:set_option_default(Opts, backlog, 1024),
-	Opts3 = ranch:set_option_default(Opts2, nodelay, true),
-	Opts4 = ranch:set_option_default(Opts3, send_timeout, 30000),
-	Opts5 = ranch:set_option_default(Opts4, send_timeout_close, true),
+-spec listen(ranch:transport_opts(opts())) -> {ok, inet:socket()} | {error, atom()}.
+listen(TransOpts) ->
+	Logger = maps:get(logger, TransOpts, logger),
+	SocketOpts0 = maps:get(socket_opts, TransOpts, []),
+	SocketOpts1 = ranch:set_option_default(SocketOpts0, backlog, 1024),
+	SocketOpts2 = ranch:set_option_default(SocketOpts1, nodelay, true),
+	SocketOpts3 = ranch:set_option_default(SocketOpts2, send_timeout, 30000),
+	SocketOpts4 = ranch:set_option_default(SocketOpts3, send_timeout_close, true),
 	%% We set the port to 0 because it is given in the Opts directly.
 	%% The port in the options takes precedence over the one in the
 	%% first argument.
-	gen_tcp:listen(0, ranch:filter_options(Opts5, disallowed_listen_options(),
-		[binary, {active, false}, {packet, raw}, {reuseaddr, true}])).
+	gen_tcp:listen(0, ranch:filter_options(SocketOpts4, disallowed_listen_options(),
+		[binary, {active, false}, {packet, raw}, {reuseaddr, true}], Logger)).
 
 %% 'binary' and 'list' are disallowed but they are handled
 %% specifically as they do not have 2-tuple equivalents.
+-spec disallowed_listen_options() -> [atom()].
 disallowed_listen_options() ->
 	[active, header, mode, packet, packet_size, line_delimiter, reuseaddr].
 
@@ -100,14 +109,25 @@ disallowed_listen_options() ->
 accept(LSocket, Timeout) ->
 	gen_tcp:accept(LSocket, Timeout).
 
--spec accept_ack(inet:socket(), timeout()) -> ok.
-accept_ack(CSocket, Timeout) ->
-	{ok, _} = handshake(CSocket, [], Timeout),
-	ok.
+-spec handshake(inet:socket(), timeout()) -> {ok, inet:socket()}.
+handshake(CSocket, Timeout) ->
+	handshake(CSocket, [], Timeout).
 
 -spec handshake(inet:socket(), opts(), timeout()) -> {ok, inet:socket()}.
 handshake(CSocket, _, _) ->
 	{ok, CSocket}.
+
+-spec handshake_continue(inet:socket(), timeout()) -> no_return().
+handshake_continue(CSocket, Timeout) ->
+	handshake_continue(CSocket, [], Timeout).
+
+-spec handshake_continue(inet:socket(), opts(), timeout()) -> no_return().
+handshake_continue(_, _, _) ->
+	error(not_supported).
+
+-spec handshake_cancel(inet:socket()) -> no_return().
+handshake_cancel(_) ->
+	error(not_supported).
 
 %% @todo Probably filter Opts?
 -spec connect(inet:ip_address() | inet:hostname(),
@@ -130,6 +150,30 @@ connect(Host, Port, Opts, Timeout) when is_integer(Port) ->
 	-> {ok, any()} | {error, closed | atom()}.
 recv(Socket, Length, Timeout) ->
 	gen_tcp:recv(Socket, Length, Timeout).
+
+-spec recv_proxy_header(inet:socket(), timeout())
+	-> {ok, ranch_proxy_header:proxy_info()}
+	| {error, closed | atom()}
+	| {error, protocol_error, atom()}.
+recv_proxy_header(Socket, Timeout) ->
+	case recv(Socket, 0, Timeout) of
+		{ok, Data} ->
+			case ranch_proxy_header:parse(Data) of
+				{ok, ProxyInfo, <<>>} ->
+					{ok, ProxyInfo};
+				{ok, ProxyInfo, Rest} ->
+					case gen_tcp:unrecv(Socket, Rest) of
+						ok ->
+							{ok, ProxyInfo};
+						Error ->
+							Error
+					end;
+				{error, HumanReadable} ->
+					{error, protocol_error, HumanReadable}
+			end;
+		Error ->
+			Error
+	end.
 
 -spec send(inet:socket(), iodata()) -> ok | {error, atom()}.
 send(Socket, Packet) ->
@@ -201,12 +245,12 @@ controlling_process(Socket, Pid) ->
 	gen_tcp:controlling_process(Socket, Pid).
 
 -spec peername(inet:socket())
-	-> {ok, {inet:ip_address(), inet:port_number()}} | {error, atom()}.
+	-> {ok, {inet:ip_address(), inet:port_number()} | {local, binary()}} | {error, atom()}.
 peername(Socket) ->
 	inet:peername(Socket).
 
 -spec sockname(inet:socket())
-	-> {ok, {inet:ip_address(), inet:port_number()}} | {error, atom()}.
+	-> {ok, {inet:ip_address(), inet:port_number()} | {local, binary()}} | {error, atom()}.
 sockname(Socket) ->
 	inet:sockname(Socket).
 
